@@ -1,102 +1,121 @@
-# canton-token-vesting
+# Canton Token Vesting
 
-A Daml smart contract suite for managing token vesting schedules on the Canton Network. This project facilitates team and investor token vesting with features like cliff periods, linear release schedules, accelerated vesting upon liquidity events, and revocation capabilities controlled by the token issuer.
+A Canton/Daml smart contract suite for managing token vesting schedules, typically used for team members, advisors, and investors. This project supports:
+
+-   **Cliff Vesting:** A period after which the first tranche of tokens vests.
+-   **Linear Vesting:** Tokens vest linearly over a defined period.
+-   **Liquidity Event Vesting:** Accelerated vesting triggered by a liquidity event.
+-   **Revocation:** Ability for the issuer to revoke unvested tokens under certain conditions.
 
 ## Features
 
-- **Cliff Vesting:** Tokens are locked for an initial period (the "cliff") before vesting begins.
-- **Linear Vesting:** Tokens vest linearly over a defined period after the cliff.
-- **Liquidity Event Acceleration:** Vesting can be accelerated upon the occurrence of a predefined liquidity event (e.g., acquisition, IPO).
-- **Revocation:** The token issuer can revoke unvested tokens under specified conditions.
-- **Role-Based Access Control:** Clear separation of roles for the token issuer, vesting recipient, and potentially, an administrator.
-- **Canton Network Compatibility:** Designed to operate seamlessly within the Canton Network, leveraging its privacy and interoperability features.
-- **JSON Ledger API Frontend:** A basic TypeScript frontend interacts with the Canton ledger via the JSON API for easy testing and demonstration.
+-   **Daml Smart Contracts:**  Robust and auditable vesting logic implemented in Daml, ensuring secure and transparent token release.
+-   **Canton Network Compatibility:** Designed to be deployed on the Canton Network, leveraging its privacy and scalability features.
+-   **TypeScript Frontend:** A simple web interface allows issuers to manage vesting schedules and recipients to view their vesting status.
+-   **JSON Ledger API:**  The frontend interacts with the Canton ledger using the JSON API, providing a straightforward integration point.
+
+## Architecture
+
+The project consists of the following key components:
+
+1.  **Daml Contracts:** Defines the core vesting logic, including `VestingSchedule`, `VestedTokens`, and related contracts.
+2.  **Daml Script Tests:** Contains comprehensive tests to validate the correctness of the Daml contracts.
+3.  **TypeScript Frontend:** Provides a user interface for interacting with the vesting contracts.
+4.  **Canton Network Configuration:**  Configuration files for deploying and running the application on a Canton network.
 
 ## Prerequisites
 
-- [Daml SDK](https://daml.com/developer/docs/setup/index.html) (version 3.1.0)
-- [Node.js](https://nodejs.org/) and npm (Node Package Manager)
-- Canton running locally or accessible network
+Before you begin, ensure you have the following installed:
+
+-   [Daml SDK](https://docs.daml.com/getting-started/index.html) (version 3.1.0 or later)
+-   [Node.js](https://nodejs.org/) (version 16 or later)
+-   [npm](https://www.npmjs.com/) (or [yarn](https://yarnpkg.com/))
+-   A running Canton network (or a sandbox environment for testing)
 
 ## Setup Instructions
 
-1. **Clone the repository:**
+Follow these steps to set up and run the project:
 
-   ```bash
-   git clone <repository_url>
-   cd canton-token-vesting
-   ```
+1.  **Clone the Repository:**
 
-2. **Build the Daml project:**
+    ```bash
+    git clone <repository-url>
+    cd canton-token-vesting
+    ```
 
-   ```bash
-   daml build
-   ```
+2.  **Build the Daml Contracts:**
 
-3. **Generate the Daml ledger model:**
+    ```bash
+    daml build
+    ```
 
-   ```bash
-   daml codegen js .daml/dist/canton-token-vesting-0.1.0.dar --output frontend/src/generated
-   ```
-   This command generates TypeScript code from the Daml model, which is used by the frontend to interact with the ledger.
+3.  **Generate the DAR file:**
 
-4. **Install frontend dependencies:**
+    ```bash
+    daml codegen dar .
+    ```
 
-   ```bash
-   cd frontend
-   npm install
-   cd ..
-   ```
+4.  **Start a Canton Sandbox (Optional for local testing):**
 
-5. **Start the Canton ledger (if not already running):**
+    If you don't have a Canton network, start a sandbox:
 
-   Refer to the Canton documentation for instructions on setting up and running a Canton network.  Ensure you have the necessary participants and domain configurations.
+    ```bash
+    daml sandbox .daml/dist/canton-token-vesting-0.1.0.dar
+    ```
 
-6. **Deploy the DAR file to Canton:**
+    Note the port the sandbox is running on (default is 6865).
 
-   Use the Canton CLI to upload and activate the DAR file on your Canton network.  This typically involves specifying the participant and domain.  Refer to Canton documentation for exact steps.
+5.  **Install Frontend Dependencies:**
 
-7. **Configure the frontend:**
+    ```bash
+    cd ui
+    npm install
+    ```
 
-   - Create a `.env` file in the `frontend` directory based on the `.env.example` file, setting the correct ledger API endpoint and access token.
-   - Obtain a valid access token for your Canton participant.  This usually involves authenticating against the Canton identity provider.
+6.  **Configure Frontend:**
 
-8. **Start the frontend:**
+    Create a `.env` file in the `ui` directory with the following variables, adjusting the values to match your Canton setup:
 
-   ```bash
-   cd frontend
-   npm start
-   ```
+    ```
+    REACT_APP_LEDGER_URL=http://localhost:7575
+    REACT_APP_PARTY=Issuer
+    REACT_APP_TOKEN=your_jwt_token_here
+    ```
 
-   The frontend should now be accessible in your browser, typically at `http://localhost:3000`.
+    *Replace `your_jwt_token_here` with a valid JWT token for your Canton participant.*  You can generate a token using the Canton CLI or API. The `REACT_APP_PARTY` should correspond to a party you have rights for on the Canton Ledger.
 
-## Project Structure
+7.  **Run the Frontend:**
 
-- `daml/`: Contains the Daml smart contracts.
-  - `TokenVesting.daml`: Core vesting logic.
-  - `Types.daml`: Custom data types.
-- `frontend/`: Contains the TypeScript frontend.
-  - `src/`: Frontend source code.
-  - `src/generated/`: Generated Daml ledger model.
-  - `package.json`: Frontend dependencies.
-- `daml.yaml`: Daml project configuration.
-- `.gitignore`: Git ignore file.
-- `README.md`: Project documentation.
+    ```bash
+    npm start
+    ```
 
-## Using the Contracts
+    The frontend will be accessible at `http://localhost:3000` (or the port specified by your environment).
 
-The `TokenVesting.daml` file contains the main contracts:
+## Daml Script Testing
 
-- `VestingSchedule`: Represents the overall vesting agreement.
-- `VestingCliff`: Defines the cliff period.
-- `VestingGrant`: Represents individual vesting grants.
+To run the Daml script tests:
 
-The frontend provides a basic interface for creating vesting schedules, managing grants, and triggering liquidity events.  Refer to the contract code for detailed documentation on each contract and its choices.
+```bash
+daml script
+```
+
+This will execute the tests defined in the `test` directory and verify the correctness of the contract logic.
+
+## Deployment to a Canton Network
+
+For deployment to a real Canton network, you'll need to configure your participant(s) and upload the DAR file. Refer to the Canton documentation for detailed deployment instructions.
+
+## Contract Overview
+
+-   **VestingSchedule:**  The main contract defining the vesting terms (cliff, vesting period, total tokens, etc.).
+-   **VestedTokens:** Represents the vested tokens owned by a specific recipient.
+-   **RevocationRequest:** A contract representing a request from the issuer to revoke unvested tokens.
 
 ## Contributing
 
-Contributions are welcome! Please submit pull requests with detailed descriptions of the changes.
+Contributions are welcome! Please submit pull requests with clear descriptions of the changes.
 
 ## License
 
-[MIT License](LICENSE)
+This project is licensed under the [MIT License](LICENSE).

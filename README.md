@@ -1,108 +1,112 @@
-# Canton Token Vesting
+# canton-token-vesting
 
-This project implements a robust token vesting solution on the Canton Network using Daml smart contracts. It provides a flexible framework for managing token distributions to team members and investors, incorporating common vesting features such as cliff periods, linear release schedules, accelerated vesting on liquidity events, and issuer-controlled revocation. A lightweight TypeScript frontend interacts with the Canton JSON API to demonstrate the contract's functionality.
+This project implements token vesting smart contracts on the Canton Network using Daml. It supports cliff periods, linear vesting schedules, accelerated vesting upon liquidity events, and revocation by the token issuer. A TypeScript frontend is included for interacting with the contracts via the Canton JSON Ledger API.
 
-## Features
+## Overview
 
-*   **Vesting Agreement**: Establishes a formal agreement between an issuer and a recipient for token vesting.
-*   **Cliff Period**: Tokens begin vesting only after a specified initial period (the "cliff").
-*   **Linear Vesting Schedule**: Tokens are released linearly over a defined vesting period after the cliff.
-*   **Accelerated Vesting**: Supports immediate vesting of all remaining unvested tokens upon a specified liquidity event (e.g., acquisition, IPO).
-*   **Revocation**: The issuing party can revoke the vesting agreement, forfeiting all unvested tokens.
-*   **Token Claiming**: Recipients can claim vested tokens at any time after they become available.
-*   **Auditability**: All actions and state changes are recorded on the Canton ledger, providing a transparent and auditable trail.
+Token vesting is a crucial mechanism for aligning incentives between project teams, investors, and the broader community. This Daml implementation provides a robust and transparent solution for managing token vesting schedules within the Canton Network.
 
-## Project Structure
+Key features include:
 
-The project is divided into two main parts:
-
-*   **`daml/`**: Contains the Daml smart contract definitions.
-    *   `daml.yaml`: Daml project configuration.
-    *   `Daml.Vesting.daml`: Core vesting contract templates (`VestingAgreement`, `VestingSchedule`, etc.).
-    *   `Daml.Vesting.Test.daml`: Unit tests for the Daml contracts.
-    *   `Daml.Vesting.Script.daml`: Daml Script for setting up initial parties and demonstrating basic workflows.
-*   **`ui-ts/`**: A TypeScript client application that interacts with the Canton JSON API.
-    *   `package.json`: Node.js project configuration and dependencies.
-    *   `src/index.ts`: Main application logic for interacting with the Daml ledger.
-    *   `src/setup.ts`: Helper functions for party setup and initial contract creation.
+-   **Cliff Period:** Tokens remain locked until a specified date.
+-   **Linear Vesting:** Tokens unlock linearly over a defined period after the cliff.
+-   **Liquidity Event Acceleration:** Vesting can be accelerated upon certain events (e.g., acquisition).
+-   **Revocation:** The issuer can revoke unvested tokens under certain conditions.
+-   **TypeScript Frontend:** Provides a user interface for creating, viewing, and interacting with vesting contracts.
 
 ## Prerequisites
 
-Before running this project, you need to have the following installed:
+-   [Daml SDK](https://docs.daml.com/docs/getting-started/installation.html) (version 3.1.0)
+-   [Node.js](https://nodejs.org/) (version 18 or higher)
+-   [Canton](https://docs.canton.io/docs/) (with a running participant)
 
-1.  **Daml SDK (v3.1.0)**:
+## Setup Instructions
+
+1.  **Clone the repository:**
+
     ```bash
-    curl -sSL https://get.daml.com/ | sh -s 3.1.0
-    export PATH=$HOME/.daml/bin:$PATH # Add to your shell profile for persistence
+    git clone <repository_url>
+    cd canton-token-vesting
     ```
-2.  **Node.js & npm**:
+
+2.  **Build the Daml project:**
+
     ```bash
-    # Install Node.js (e.g., via nvm, or directly from nodejs.org)
-    node -v
-    npm -v
+    daml build
     ```
-3.  **Canton Ledger**: A running Canton instance (e.g., `daml sandbox`).
 
-## Setup and Running the Project
+3.  **Create a DAR file:**
 
-Follow these steps to set up and run the Daml contracts and the TypeScript client.
+    ```bash
+    daml build
+    ```
 
-### 1. Start a Canton Ledger (Daml Sandbox)
+4.  **Deploy the DAR file to your Canton participant:**
 
-Open a new terminal and start a Daml Sandbox instance. This will also start the JSON API server.
+    Follow your Canton setup instructions for deploying a DAR file. This typically involves using the Canton console or API.
 
-```bash
-daml sandbox --json-api-port 7575
-```
+5.  **Configure the TypeScript frontend:**
 
-Keep this terminal open as long as you want the ledger to run. The JSON API will be accessible at `http://localhost:7575`.
+    -   Navigate to the `ui` directory:
 
-### 2. Build and Deploy Daml Contracts
+        ```bash
+        cd ui
+        ```
 
-In a separate terminal, navigate to the project root and build the Daml contracts.
+    -   Install dependencies:
 
-```bash
-daml build
-```
+        ```bash
+        npm install
+        ```
 
-Then, deploy the `.dar` file to your running Canton Sandbox using the Daml assistant's `daml ledger upload-dar` command or by explicitly configuring the JSON API to load it. For this example, the TypeScript client will implicitly handle the initial DAR upload by virtue of how it interacts with the JSON API.
+    -   Create a `.env` file in the `ui` directory with the following variables:
 
-Alternatively, you can run the Daml script to initialize parties and some contracts:
-```bash
-daml script --input-file .daml/dist/canton-token-vesting-0.1.0.dar --script-name Daml.Vesting.Script:setupAndDemonstrate --ledger-host localhost --ledger-port 6865 --json-api-port 7575 --use-acs --output-file script-output.txt
-```
-(Note: The TypeScript client will perform its own setup, so this step is optional for demonstration, but useful for testing the script itself.)
+        ```
+        REACT_APP_LEDGER_URL=http://localhost:7575
+        REACT_APP_AUTH_TOKEN=<your_canton_jwt_token>
+        REACT_APP_PARTY=<your_participant_party_name>
+        ```
 
-### 3. Initialize and Run the TypeScript Client
+        Replace `<your_canton_jwt_token>` with a valid JWT token for your Canton participant. Replace `<your_participant_party_name>` with the party name you are using on the Canton network.  You can obtain the JWT token from your Canton participant's configuration or by using a tool like `canton identity jwt`.
 
-In another terminal, navigate into the `ui-ts` directory, install dependencies, and then run the client.
+6.  **Run the TypeScript frontend:**
 
-```bash
-cd ui-ts
-npm install
-npm start
-```
+    ```bash
+    npm start
+    ```
 
-The TypeScript client will:
-1.  Connect to the JSON API at `http://localhost:7575`.
-2.  Set up default parties (`Issuer`, `TeamMember1`, `Investor1`, `LiquidityProvider`).
-3.  Create and demonstrate several vesting scenarios:
-    *   A basic team member vesting with cliff and linear release.
-    *   An investor vesting with a different schedule.
-    *   Demonstrate claiming vested tokens.
-    *   Demonstrate accelerated vesting on a liquidity event.
-    *   Demonstrate revocation of an unvested agreement.
-4.  Print the results and contract IDs to the console.
+    This will start the frontend application, typically accessible at `http://localhost:3000`.
 
-## Workflow Overview
+## Using the Contracts
 
-The general workflow for token vesting using these contracts is as follows:
+The contracts define the following key functionalities:
 
-1.  **Party Setup**: The `Issuer` (e.g., the company or foundation issuing tokens) and `Recipient` (e.g., team member, investor) parties are created on the Canton ledger.
-2.  **Proposal**: The `Issuer` proposes a `VestingProposal` contract to a `Recipient`, specifying the total token amount, vesting start date, cliff duration, vesting duration, and an optional `LiquidityProvider` for acceleration.
-3.  **Acceptance**: The `Recipient` accepts the `VestingProposal`, creating a `VestingAgreement` contract. This contract signifies the binding agreement.
-4.  **Token Issuance**: The `Issuer` issues the initial tokens associated with the `VestingAgreement`. These tokens are held in escrow, linked to the `VestingAgreement`.
-5.  **Vesting Schedule**: Over time, based on the vesting start date, cliff, and linear schedule, tokens become `Vested`.
-6.  **Claiming**: The `Recipient` can `ClaimVested` tokens at any point when they have become vested. This exercises a choice on the `VestingAgreement` to transfer the tokens to the recipient.
-7.  **Acceleration**: If a `LiquidityEvent` occurs (declared by the `LiquidityProvider`), the `VestingAgreement` can be `Accelerated`, making all remaining unvested tokens immediately vested and claimable.
-8.  **Revocation**: The `Issuer` can `RevokeVesting` if the agreement terms allow (e.g., employee departure), leading to the forfeiture of any unvested tokens.
+-   **TokenVestingAgreement:**  The main contract representing the vesting agreement between the issuer and the beneficiary.  It includes the cliff date, vesting start date, vesting end date, total amount of tokens, tokens vested, and acceleration clauses.
+-   **CreateTokenVesting:** Choice on a TokenIssuer contract to propose a new TokenVestingAgreement.
+-   **AcceptTokenVesting:** Choice on the TokenVestingAgreement to accept the proposed agreement, creating the TokenVestingAgreement contract.
+-   **VestedAmount:** Choice to calculate the amount of tokens vested as of the current date.
+-   **RevokeTokens:** Choice for the token issuer to revoke unvested tokens under specific conditions.
+-   **AccelerateVesting:** Choice to trigger accelerated vesting.
+
+The TypeScript frontend provides a user-friendly interface for:
+
+-   Creating new token vesting agreements.
+-   Viewing existing vesting agreements.
+-   Calculating vested amounts.
+-   Exercising choices related to revocation and acceleration (depending on your Canton setup and permissions).
+
+## Important Considerations
+
+-   **Canton Network Configuration:**  Ensure your Canton network is properly configured with the necessary participants and permissions.
+-   **Security:**  This is a demonstration project.  For production use, conduct a thorough security audit of the Daml code and the frontend application.  Pay close attention to access control and data validation.
+-   **Error Handling:** The frontend provides basic error handling.  Enhance this for a production environment.
+-   **Customization:**  The vesting logic and acceleration criteria can be customized to fit specific project requirements.
+-   **Scalability:** Consider the scalability implications of deploying these contracts to a large Canton network.
+
+## Contributing
+
+Contributions are welcome! Please submit pull requests with clear descriptions of the changes.
+
+## License
+
+[MIT License](LICENSE)

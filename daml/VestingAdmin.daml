@@ -1,0 +1,74 @@
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module VestingAdmin where
+
+import DA.Time (Time)
+import TokenVesting (VestingAgreement)
+
+-- | The `VestingAdmin` template provides the `issuer` with specific administrative
+-- | capabilities over an existing `VestingAgreement`. These capabilities, such as
+-- | revoking or accelerating a grant, are typically defined in the off-ledger
+-- | legal agreement between the parties. This contract acts as the on-ledger
+-- | embodiment of those administrative rights.
+template VestingAdmin
+  with
+    issuer : Party
+      -- ^ The party who granted the tokens and holds administrative rights.
+    beneficiary : Party
+      -- ^ The party receiving the vesting tokens.
+    vestingAgreementCid : ContractId VestingAgreement
+      -- ^ The contract ID of the specific `VestingAgreement` this admin contract controls.
+  where
+    signatory issuer
+    observer beneficiary
+
+    key (issuer, beneficiary, vestingAgreementCid) : (Party, Party, ContractId VestingAgreement)
+    maintainer key._1
+
+    -- | Allows the issuer to revoke the vesting agreement, halting any future vesting.
+    -- | This is a destructive action that should align with the legal terms of the grant.
+    -- | Vested tokens are unaffected, but all unvested tokens are forfeited.
+    choice RevokeVesting : ()
+      with
+        revocationTime : Time
+          -- ^ The timestamp when the revocation becomes effective.
+        reason : Text
+          -- ^ A brief explanation for the revocation.
+      controller issuer
+      do
+        -- The core revocation logic resides on the `VestingAgreement` template itself.
+        -- This choice serves as a controller to invoke that logic. The `Revoke` choice
+        -- on the agreement is expected to handle the archival of the agreement and the
+        -- return of unvested tokens.
+        exercise vestingAgreementCid TokenVesting.Revoke with
+          revocationTime, reason
+
+        -- Since the underlying agreement is terminated, this administrative contract
+        -- is no longer needed and is archived.
+        archive self
+
+    -- | Allows the issuer to trigger an accelerated vesting schedule. This is typically
+    -- | done in response to a predefined liquidity event, such as a company acquisition
+    -- | or IPO, as specified in the grant agreement.
+    choice AccelerateVesting : ContractId VestingAdmin
+      with
+        eventTime : Time
+          -- ^ The timestamp of the event that triggers the acceleration.
+        reason : Text
+          -- ^ A description of the acceleration event (e.g., "Acquisition by ACME Corp").
+      controller issuer
+      do
+        -- The `Accelerate` choice on the `VestingAgreement` is expected to archive the
+        -- current agreement and create a new one with an updated, accelerated schedule.
+        -- It returns the ContractId of this new agreement.
+        newVestingAgreementCid <- exercise vestingAgreementCid TokenVesting.Accelerate with
+          eventTime, reason
+
+        -- To maintain administrative control over the new, accelerated agreement,
+        -- we create a new `VestingAdmin` contract linked to it. The current admin
+        -- contract is consumed in this choice.
+        create VestingAdmin with
+          issuer = this.issuer
+          beneficiary = this.beneficiary
+          vestingAgreementCid = newVestingAgreementCid

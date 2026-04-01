@@ -1,0 +1,147 @@
+module TokenVesting where
+
+import DA.Date
+import DA.Time
+import DA.Optional
+import DA.Assert
+import DA.Numeric (intToDecimal)
+
+-- Data type to provide a summary of the vesting status.
+-- Useful for UIs to display the current state of a vesting grant.
+data VestingStatus = VestingStatus
+  with
+    totalAmount : Decimal
+    totalVested : Decimal
+    claimable : Decimal
+    vestedToDate : Date
+    isRevoked: Bool
+    isAccelerated: Bool
+  deriving (Eq, Show)
+
+
+-- This template represents a token vesting agreement between an issuer and a beneficiary.
+-- It supports a cliff period and linear vesting over a defined period.
+-- It also allows for revocation by the issuer and accelerated vesting for liquidity events.
+template VestingAgreement
+  with
+    issuer: Party          -- The entity granting the tokens (e.g., the company)
+    beneficiary: Party     -- The recipient of the tokens (e.g., employee, investor)
+    grantId: Text          -- A unique identifier for this grant
+    tokenSymbol: Text      -- The symbol of the token being vested (e.g., "ACME")
+    totalAmount: Decimal   -- The total number of tokens in this grant
+    grantDate: Date        -- The start date of the vesting schedule
+    vestingPeriodDays: Int -- The total number of days over which tokens vest
+    cliffDays: Int         -- The number of days before any tokens start to vest
+    lastClaimDate: Date    -- The last date tokens were claimed, initialized to grantDate
+    revoked: Bool          -- Flag to indicate if the grant has been revoked
+    accelerationDate: Optional Date -- Optional date for accelerated vesting (e.g., IPO date)
+  where
+    signatory issuer, beneficiary
+
+    observer beneficiary
+
+    ensure totalAmount > 0.0 && vestingPeriodDays > 0 && cliffDays >= 0 && vestingPeriodDays >= cliffDays
+
+    key (issuer, grantId) : (Party, Text)
+    maintainer key._1
+
+    -- Private helper function to calculate the total vested amount as of a specific date.
+    let
+      calculateVestedAmountAt : Date -> Decimal
+      calculateVestedAmountAt asOfDate =
+        let
+          -- Determine the effective date for calculation. If an acceleration event has occurred
+          -- and the `asOfDate` is on or after it, the vesting is considered complete.
+          effectiveDate =
+            case accelerationDate of
+              Some accDate | asOfDate >= accDate -> grantDate `addDays` vestingPeriodDays
+              _ -> asOfDate
+
+          daysElapsed = daysInPeriod grantDate effectiveDate
+
+        in if not (daysElapsed >= cliffDays) then
+            -- Cliff period not yet met, so no tokens have vested.
+            0.0
+           else if daysElapsed >= vestingPeriodDays then
+            -- Entire vesting period has passed, all tokens are vested.
+            totalAmount
+           else
+            -- Linearly calculate the vested portion based on days elapsed.
+            totalAmount * (intToDecimal daysElapsed / intToDecimal vestingPeriodDays)
+
+    -- A non-consuming choice for the beneficiary to view the current state of their grant.
+    nonconsuming choice GetVestingStatus : VestingStatus
+      with
+        currentTime: Time
+      controller beneficiary
+      do
+        let currentDate = date (toDateUTC currentTime)
+
+        -- If the contract has been revoked, no tokens are considered vested or claimable
+        -- from the point of view of this contract state.
+        if revoked then
+          return VestingStatus with
+            totalAmount
+            , totalVested = 0.0
+            , claimable = 0.0
+            , vestedToDate = currentDate
+            , isRevoked = True
+            , isAccelerated = isSome accelerationDate
+        else
+          let
+            totalVestedSoFar = calculateVestedAmountAt currentDate
+            vestedAtLastClaim = calculateVestedAmountAt lastClaimDate
+            claimableAmount = totalVestedSoFar - vestedAtLastClaim
+          in return VestingStatus with
+              totalAmount
+              , totalVested = totalVestedSoFar
+              , claimable = if claimableAmount > 0.0 then claimableAmount else 0.0
+              , vestedToDate = currentDate
+              , isRevoked = revoked
+              , isAccelerated = isSome accelerationDate
+
+    -- The beneficiary can claim any tokens that have vested since their last claim.
+    choice ClaimVestedTokens : ContractId VestingAgreement
+      with
+        currentTime: Time
+      controller beneficiary
+      do
+        -- Pre-conditions
+        assertMsg "Vesting agreement has been revoked and tokens cannot be claimed." (not revoked)
+        let currentDate = date (toDateUTC currentTime)
+        assertMsg "Cannot claim tokens before the grant date." (currentDate >= grantDate)
+
+        -- Calculation
+        let totalVestedSoFar = calculateVestedAmountAt currentDate
+        let vestedAtLastClaim = calculateVestedAmountAt lastClaimDate
+        let claimableAmount = totalVestedSoFar - vestedAtLastClaim
+
+        assertMsg "No new tokens have vested since your last claim." (claimableAmount > 0.0)
+
+        -- Effects
+        -- In a real-world system, this choice would trigger an on-ledger token transfer.
+        -- For this model, we simply update the `lastClaimDate` to reflect that the
+        -- beneficiary's entitlement up to `currentDate` has been acknowledged.
+        create this with
+          lastClaimDate = currentDate
+
+    -- The issuer can revoke the vesting agreement, for example, if an employee is terminated.
+    -- This action prevents any future vesting and claiming of tokens under this agreement.
+    choice Revoke : ContractId VestingAgreement
+      controller issuer
+      do
+        assertMsg "Vesting agreement is already revoked." (not revoked)
+        create this with revoked = True
+
+    -- The issuer can accelerate vesting, for example, upon a company acquisition.
+    -- This makes all remaining tokens vest immediately on the specified event date.
+    choice Accelerate : ContractId VestingAgreement
+      with
+        eventDate: Date
+      controller issuer
+      do
+        assertMsg "A revoked agreement cannot be accelerated." (not revoked)
+        assertMsg "Vesting has already been accelerated." (isNone accelerationDate)
+        assertMsg "Acceleration event date cannot be before the grant date." (eventDate >= grantDate)
+
+        create this with accelerationDate = Some eventDate

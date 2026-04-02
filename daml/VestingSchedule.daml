@@ -1,0 +1,61 @@
+-- |
+-- Copyright (c) 2024, Digital Asset (Switzerland) GmbH and/or its affiliates.
+-- All rights reserved.
+--
+
+module VestingSchedule where
+
+import DA.Date
+import DA.Assert
+import DA.Conversion
+
+-- | Defines the parameters for a token vesting schedule.
+-- This includes the start date, cliff period, total duration, and total quantity.
+-- The vesting is linear after the cliff period.
+data VestingSchedule = VestingSchedule
+  with
+    startDate : Date
+      -- ^ The date when the vesting schedule commences.
+    cliffDurationDays : Int
+      -- ^ The number of days from the start date before any tokens begin to vest.
+      -- During the cliff period, the vested amount is zero.
+    totalDurationDays : Int
+      -- ^ The total duration of the vesting period in days, starting from `startDate`.
+      -- After this period, all tokens are fully vested.
+    totalQuantity : Decimal
+      -- ^ The total number of tokens subject to this vesting schedule.
+  deriving (Eq, Show)
+
+-- | Calculates the amount of tokens that have vested as of a given date.
+-- The calculation follows a linear vesting schedule after the cliff period.
+calculateVestedQuantity : VestingSchedule -> Date -> Decimal
+calculateVestedQuantity schedule currentDate =
+  let
+    -- Pre-conditions to ensure the schedule and date are valid.
+    _ = assertMsg "Current date must be on or after the schedule start date"
+          (currentDate >= schedule.startDate)
+    _ = assertMsg "Total duration must be greater than or equal to cliff duration"
+          (schedule.totalDurationDays >= schedule.cliffDurationDays)
+    _ = assertMsg "Durations must be non-negative"
+          (schedule.cliffDurationDays >= 0)
+    _ = assertMsg "Total duration must be positive to avoid division by zero"
+          (schedule.totalDurationDays > 0)
+    _ = assertMsg "Total quantity must be non-negative"
+          (schedule.totalQuantity >= 0.0)
+
+    daysElapsed = daysSinceEpoch currentDate - daysSinceEpoch schedule.startDate
+
+  in
+    if daysElapsed < schedule.cliffDurationDays then
+      -- Before the cliff period has ended, no tokens are vested.
+      0.0
+    else if daysElapsed >= schedule.totalDurationDays then
+      -- After the total vesting period has passed, all tokens are vested.
+      schedule.totalQuantity
+    else
+      -- During the linear vesting period (post-cliff).
+      -- The vested amount is proportional to the time elapsed within the total duration.
+      let
+        vestedRatio = (intToDecimal daysElapsed) / (intToDecimal schedule.totalDurationDays)
+      in
+        schedule.totalQuantity * vestedRatio

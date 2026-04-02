@@ -1,0 +1,273 @@
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module VestingTest where
+
+import Daml.Script
+import DA.Date (date, addDays, toDateUTC)
+import DA.Time (time, addRelTime, days)
+import DA.Assert
+
+import TokenVesting
+import VestingAdmin
+import VestingSchedule
+
+-- | Sets up standard parties for the tests.
+setupParties : Script (Party, Party)
+setupParties = do
+  issuer <- allocateParty "TokenIssuer"
+  beneficiary <- allocateParty "Beneficiary"
+  pure (issuer, beneficiary)
+
+-- | Main test suite that runs all individual vesting tests.
+vesting_tests : Script ()
+vesting_tests = script do
+  test "Full vesting lifecycle from proposal to completion" test_full_lifecycle
+  test "Revocation of a vesting agreement mid-schedule" test_revocation
+  test "Accelerated vesting due to a liquidity event" test_accelerated_vesting
+  test "Attempting to claim tokens before the cliff date" test_claim_before_cliff
+  test "Beneficiary rejecting a vesting proposal" test_proposal_rejection
+  test "Claiming exactly on the cliff date" test_claim_on_cliff_date
+
+-- | Test the standard happy path: proposal, acceptance, partial claim, final claim.
+test_full_lifecycle : Script ()
+test_full_lifecycle = do
+  (issuer, beneficiary) <- setupParties
+  startTime <- getTime
+  let
+    tokenSymbol = "ACME"
+    totalAmount = 10000.0
+    cliffDurationDays = 30
+    vestingDurationDays = 365
+    startDate = toDateUTC startTime
+    schedule = VestingSchedule with
+      cliffDate = addDays cliffDurationDays startDate
+      vestingStartDate = startDate
+      vestingEndDate = addDays vestingDurationDays startDate
+
+  -- 1. Issuer proposes a vesting agreement
+  proposalCid <- submit issuer do
+    create VestingProposal with
+      issuer, beneficiary, totalAmount, tokenSymbol, schedule,
+      isRevocable = True,
+      acceleratedVestingOnLiquidityEvent = True
+
+  -- 2. Beneficiary accepts the proposal
+  (agreementCid, _events) <- submit beneficiary do
+    exercise proposalCid AcceptVestingProposal
+
+  -- 3. Advance time to mid-vesting period (e.g., 180 days)
+  let midVestingTime = addRelTime (days 180) startTime
+  setTime midVestingTime
+
+  -- 4. Beneficiary claims vested tokens
+  (newAgreementCidOpt, releasedTokens) <- submit beneficiary do
+    exercise agreementCid ClaimVestedTokens with claimTime = midVestingTime
+  
+  let newAgreementCid = fromSomeNote "Expected new agreement to be created" newAgreementCidOpt
+
+  -- 5. Validate the released amount and new agreement state
+  let expectedVested = calculateVestedAmount schedule totalAmount midVestingTime
+  expectedVested === releasedTokens
+  assertMsg "Released tokens should be greater than zero" (releasedTokens > 0.0)
+  assertMsg "Released tokens should be less than total amount" (releasedTokens < totalAmount)
+
+  newAgreement <- fetch newAgreementCid
+  newAgreement.totalAmount === (totalAmount - releasedTokens)
+  newAgreement.vestedAmount === 0.0 -- Vested amount resets on claim
+
+  -- 6. Advance time past the end of the vesting period
+  let endVestingTime = addRelTime (days 366) startTime
+  setTime endVestingTime
+
+  -- 7. Beneficiary claims the final remaining tokens
+  (finalAgreementCidOpt, finalReleasedTokens) <- submit beneficiary do
+    exercise newAgreementCid ClaimVestedTokens with claimTime = endVestingTime
+
+  -- 8. Validate the final release
+  finalReleasedTokens === newAgreement.totalAmount
+  finalAgreementCidOpt === None -- Agreement should be archived after full claim
+
+-- | Test the revocation of an agreement by the issuer.
+test_revocation : Script ()
+test_revocation = do
+  (issuer, beneficiary) <- setupParties
+  startTime <- getTime
+  let
+    tokenSymbol = "ACME"
+    totalAmount = 5000.0
+    cliffDurationDays = 30
+    vestingDurationDays = 365
+    startDate = toDateUTC startTime
+    schedule = VestingSchedule with
+      cliffDate = addDays cliffDurationDays startDate
+      vestingStartDate = startDate
+      vestingEndDate = addDays vestingDurationDays startDate
+
+  agreementCid <- submit issuer do
+    create VestingAgreement with
+      issuer, beneficiary, totalAmount, vestedAmount = 0.0, tokenSymbol, schedule,
+      isRevocable = True, acceleratedVestingOnLiquidityEvent = False
+
+  -- Advance time to mid-vesting (e.g., 100 days)
+  let revocationTime = addRelTime (days 100) startTime
+  setTime revocationTime
+
+  -- Issuer revokes the agreement
+  (vestedForBeneficiary, returnedToIssuer) <- submit issuer do
+    exercise agreementCid RevokeVesting with revocationTime
+
+  -- Validate amounts
+  let expectedVested = calculateVestedAmount schedule totalAmount revocationTime
+  vestedForBeneficiary === expectedVested
+  returnedToIssuer === (totalAmount - expectedVested)
+
+  -- Verify contract is archived
+  (fetch agreementCid) `shouldFail` \_ -> pure ()
+
+-- | Test the acceleration of vesting by the issuer.
+test_accelerated_vesting : Script ()
+test_accelerated_vesting = do
+  (issuer, beneficiary) <- setupParties
+  startTime <- getTime
+  let
+    tokenSymbol = "ACME"
+    totalAmount = 2000.0
+    cliffDurationDays = 90
+    vestingDurationDays = 730 -- 2 years
+    startDate = toDateUTC startTime
+    schedule = VestingSchedule with
+      cliffDate = addDays cliffDurationDays startDate
+      vestingStartDate = startDate
+      vestingEndDate = addDays vestingDurationDays startDate
+
+  agreementCid <- submit issuer do
+    create VestingAgreement with
+      issuer, beneficiary, totalAmount, vestedAmount = 0.0, tokenSymbol, schedule,
+      isRevocable = True, acceleratedVestingOnLiquidityEvent = True
+
+  -- Advance time slightly (e.g., 10 days)
+  let eventTime = addRelTime (days 10) startTime
+  setTime eventTime
+
+  -- Issuer triggers accelerated vesting
+  acceleratedCid <- submit issuer do
+    exercise agreementCid AccelerateVesting
+
+  -- Fetch the accelerated contract and verify its schedule is fully vested
+  acceleratedAgreement <- fetch acceleratedCid
+  let eventDate = toDateUTC eventTime
+  acceleratedAgreement.schedule.cliffDate === eventDate
+  acceleratedAgreement.schedule.vestingEndDate === eventDate
+
+  -- Beneficiary claims all tokens
+  (finalAgreementCidOpt, releasedTokens) <- submit beneficiary do
+    exercise acceleratedCid ClaimVestedTokens with claimTime = eventTime
+
+  -- Validate amounts
+  releasedTokens === totalAmount
+  finalAgreementCidOpt === None
+
+-- | Test that claiming before the cliff date results in zero tokens released.
+test_claim_before_cliff : Script ()
+test_claim_before_cliff = do
+  (issuer, beneficiary) <- setupParties
+  startTime <- getTime
+  let
+    tokenSymbol = "ACME"
+    totalAmount = 1000.0
+    cliffDurationDays = 30
+    vestingDurationDays = 365
+    startDate = toDateUTC startTime
+    schedule = VestingSchedule with
+      cliffDate = addDays cliffDurationDays startDate
+      vestingStartDate = startDate
+      vestingEndDate = addDays vestingDurationDays startDate
+
+  agreementCid <- submit issuer do
+    create VestingAgreement with
+      issuer, beneficiary, totalAmount, vestedAmount = 0.0, tokenSymbol, schedule,
+      isRevocable = True, acceleratedVestingOnLiquidityEvent = True
+
+  -- Advance time, but stay before the cliff (e.g., 15 days)
+  let claimTime = addRelTime (days 15) startTime
+  setTime claimTime
+
+  -- Beneficiary tries to claim, should get 0 tokens
+  (newAgreementCidOpt, releasedTokens) <- submit beneficiary do
+    exercise agreementCid ClaimVestedTokens with claimTime
+  let newAgreementCid = fromSomeNote "Expected agreement to be re-created" newAgreementCidOpt
+
+  releasedTokens === 0.0
+  -- The agreement should be re-created with the same state
+  newAgreement <- fetch newAgreementCid
+  newAgreement.totalAmount === totalAmount
+  newAgreement.vestedAmount === 0.0
+
+-- | Test that the beneficiary can reject a proposal, which archives it.
+test_proposal_rejection : Script ()
+test_proposal_rejection = do
+  (issuer, beneficiary) <- setupParties
+  startTime <- getTime
+  let
+    tokenSymbol = "ACME"
+    totalAmount = 1000.0
+    cliffDurationDays = 30
+    vestingDurationDays = 365
+    startDate = toDateUTC startTime
+    schedule = VestingSchedule with
+      cliffDate = addDays cliffDurationDays startDate
+      vestingStartDate = startDate
+      vestingEndDate = addDays vestingDurationDays startDate
+
+  proposalCid <- submit issuer do
+    create VestingProposal with
+      issuer, beneficiary, totalAmount, tokenSymbol, schedule,
+      isRevocable = True, acceleratedVestingOnLiquidityEvent = True
+
+  -- Beneficiary rejects the proposal
+  submit beneficiary do
+    exercise proposalCid RejectVestingProposal
+
+  -- Verify proposal contract is archived
+  (fetch proposalCid) `shouldFail` \_ -> pure ()
+
+-- | Test claiming exactly on the cliff date. The full cliff amount should be released.
+test_claim_on_cliff_date : Script ()
+test_claim_on_cliff_date = do
+  (issuer, beneficiary) <- setupParties
+  startTime <- getTime
+  let
+    tokenSymbol = "ACME"
+    totalAmount = 3650.0 -- 10 tokens per day for simplicity
+    cliffDurationDays = 30
+    vestingDurationDays = 365
+    startDate = toDateUTC startTime
+    schedule = VestingSchedule with
+      cliffDate = addDays cliffDurationDays startDate
+      vestingStartDate = startDate
+      vestingEndDate = addDays vestingDurationDays startDate
+
+  agreementCid <- submit issuer do
+    create VestingAgreement with
+      issuer, beneficiary, totalAmount, vestedAmount = 0.0, tokenSymbol, schedule,
+      isRevocable = True, acceleratedVestingOnLiquidityEvent = True
+
+  -- Set time exactly to the cliff date
+  let cliffTime = addRelTime (days cliffDurationDays) startTime
+  setTime cliffTime
+
+  -- Beneficiary claims
+  (newAgreementCidOpt, releasedTokens) <- submit beneficiary do
+    exercise agreementCid ClaimVestedTokens with claimTime = cliffTime
+  let newAgreementCid = fromSomeNote "Expected new agreement after cliff claim" newAgreementCidOpt
+
+  -- Validate amounts
+  let expectedVested = calculateVestedAmount schedule totalAmount cliffTime
+  releasedTokens === expectedVested
+  assertMsg "Expected non-zero tokens on cliff date" (releasedTokens > 0.0)
+  -- For a 30 day cliff on a 365 day schedule, it should be (30/365) * totalAmount
+  expectedVested === (30.0 / 365.0) * totalAmount
+
+  newAgreement <- fetch newAgreementCid
+  newAgreement.totalAmount === (totalAmount - releasedTokens)

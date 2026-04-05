@@ -6,3 +6,15 @@ dependencies:
   - daml-prim
   - daml-stdlib
   - daml-script
+parties:
+  - Alice
+  - Bob
+  - Company
+  - Investor
+  - Employee
+scenario: Main.test
+build-options:
+  - --target=2.1
+tests:
+  - Main:test
+start-navigator: false

@@ -1,61 +1,86 @@
--- |
--- Copyright (c) 2024, Digital Asset (Switzerland) GmbH and/or its affiliates.
--- All rights reserved.
+-- | This module defines the core VestingSchedule data type and associated helper
+-- | functions for calculating vested token quantities. It is designed to be
+-- | imported and used by vesting contract templates.
 --
-
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
 module VestingSchedule where
 
 import DA.Date
 import DA.Assert
-import DA.Conversion
+import DA.Numeric
 
--- | Defines the parameters for a token vesting schedule.
--- This includes the start date, cliff period, total duration, and total quantity.
--- The vesting is linear after the cliff period.
-data VestingSchedule = VestingSchedule
-  with
-    startDate : Date
-      -- ^ The date when the vesting schedule commences.
-    cliffDurationDays : Int
-      -- ^ The number of days from the start date before any tokens begin to vest.
-      -- During the cliff period, the vested amount is zero.
-    totalDurationDays : Int
-      -- ^ The total duration of the vesting period in days, starting from `startDate`.
-      -- After this period, all tokens are fully vested.
-    totalQuantity : Decimal
-      -- ^ The total number of tokens subject to this vesting schedule.
+-- | Defines the parameters for a token vesting schedule. This data type is
+-- | serializable and intended to be embedded within contract templates.
+data VestingSchedule = VestingSchedule with
+  -- | The date when the vesting period begins, often called the vesting commencement date.
+  grantDate: Date
+  -- | The total quantity of tokens subject to vesting.
+  totalQuantity: Numeric 10
+  -- | The total duration of the vesting period in days.
+  vestingPeriodDays: Int
+  -- | The duration of the cliff period in days, starting from the `grantDate`.
+  -- | No tokens vest before the cliff period ends. At the end of the cliff,
+  -- | the beneficiary vests the amount that would have been earned to date.
+  cliffDays: Int
+  -- | If true, all unvested tokens vest immediately upon a defined liquidity event.
+  -- | The enforcement of this is handled by the calling contract template.
+  fullyVestedOnLiquidityEvent: Bool
   deriving (Eq, Show)
 
--- | Calculates the amount of tokens that have vested as of a given date.
--- The calculation follows a linear vesting schedule after the cliff period.
-calculateVestedQuantity : VestingSchedule -> Date -> Decimal
-calculateVestedQuantity schedule currentDate =
+-- | Validates the integrity of a VestingSchedule's parameters.
+-- | This should be called in the `ensure` block of any template creating a
+-- | vesting schedule.
+-- | Returns `Right ()` on success or `Left errorMsg` on failure.
+validateVestingSchedule : VestingSchedule -> Either Text ()
+validateVestingSchedule schedule = do
+  assertMsg "Total quantity must be positive" $
+    schedule.totalQuantity > 0.0
+  assertMsg "Vesting period must be a non-negative number of days" $
+    schedule.vestingPeriodDays >= 0
+  assertMsg "Cliff period must be a non-negative number of days" $
+    schedule.cliffDays >= 0
+  assertMsg "Cliff period cannot be longer than the total vesting period" $
+    schedule.cliffDays <= schedule.vestingPeriodDays
+
+-- | Calculates the quantity of tokens that have vested as of a specific date.
+-- | This function implements a linear vesting schedule that respects the cliff period.
+calculateVestedQuantity :
+  VestingSchedule  -- ^ The vesting schedule to evaluate.
+  -> Date          -- ^ The date for which to calculate the vested amount ("as of" date).
+  -> Numeric 10    -- ^ The calculated vested quantity.
+calculateVestedQuantity schedule asOfDate =
   let
-    -- Pre-conditions to ensure the schedule and date are valid.
-    _ = assertMsg "Current date must be on or after the schedule start date"
-          (currentDate >= schedule.startDate)
-    _ = assertMsg "Total duration must be greater than or equal to cliff duration"
-          (schedule.totalDurationDays >= schedule.cliffDurationDays)
-    _ = assertMsg "Durations must be non-negative"
-          (schedule.cliffDurationDays >= 0)
-    _ = assertMsg "Total duration must be positive to avoid division by zero"
-          (schedule.totalDurationDays > 0)
-    _ = assertMsg "Total quantity must be non-negative"
-          (schedule.totalQuantity >= 0.0)
-
-    daysElapsed = daysSinceEpoch currentDate - daysSinceEpoch schedule.startDate
-
+    daysSinceGrant = daysBetween schedule.grantDate asOfDate
   in
-    if daysElapsed < schedule.cliffDurationDays then
-      -- Before the cliff period has ended, no tokens are vested.
+    if asOfDate < schedule.grantDate then
+      -- Cannot vest before the grant date
       0.0
-    else if daysElapsed >= schedule.totalDurationDays then
-      -- After the total vesting period has passed, all tokens are vested.
+    else if daysSinceGrant < schedule.cliffDays then
+      -- Before the cliff period ends, nothing is vested
+      0.0
+    else if daysSinceGrant >= schedule.vestingPeriodDays then
+      -- After or on the final day, the entire amount is vested
+      schedule.totalQuantity
+    else if schedule.vestingPeriodDays == 0 then
+      -- A zero-day vesting period means instant vesting on the grant date
       schedule.totalQuantity
     else
-      -- During the linear vesting period (post-cliff).
-      -- The vested amount is proportional to the time elapsed within the total duration.
+      -- During the linear vesting period (post-cliff and pre-completion)
       let
-        vestedRatio = (intToDecimal daysElapsed) / (intToDecimal schedule.totalDurationDays)
+        -- Use Decimal (via `toReal`) for accurate floating-point division
+        vestedFraction : Decimal = toReal daysSinceGrant / toReal schedule.vestingPeriodDays
       in
-        schedule.totalQuantity * vestedRatio
+        -- Scale the total quantity by the vested fraction.
+        -- The resulting Numeric will have the same scale (10) as totalQuantity.
+        schedule.totalQuantity * fromReal vestedFraction
+
+-- | A convenience function to determine if the entire token grant is fully
+-- | vested as of a specific date.
+isFullyVested :
+  VestingSchedule -- ^ The vesting schedule to check.
+  -> Date         -- ^ The date to check against.
+  -> Bool         -- ^ True if fully vested, False otherwise.
+isFullyVested schedule asOfDate =
+  asOfDate >= schedule.grantDate &&
+  daysBetween schedule.grantDate asOfDate >= schedule.vestingPeriodDays

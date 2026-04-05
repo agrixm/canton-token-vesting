@@ -1,74 +1,80 @@
+-- |
 -- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
+--
 
 module VestingAdmin where
 
-import DA.Time (Time)
-import TokenVesting (VestingAgreement)
+import DA.Date
+import DA.Assert
 
--- | The `VestingAdmin` template provides the `issuer` with specific administrative
--- | capabilities over an existing `VestingAgreement`. These capabilities, such as
--- | revoking or accelerating a grant, are typically defined in the off-ledger
--- | legal agreement between the parties. This contract acts as the on-ledger
--- | embodiment of those administrative rights.
+import Vesting (VestingSchedule)
+
+-- | Administrative control contract for a specific vesting schedule.
+-- This contract grants the `admin` party rights to perform administrative
+-- actions like revoking or accelerating the vesting of the associated schedule.
+-- It is created by the `issuer` and links a specific `admin` to a `VestingSchedule`.
 template VestingAdmin
   with
-    issuer : Party
-      -- ^ The party who granted the tokens and holds administrative rights.
-    beneficiary : Party
-      -- ^ The party receiving the vesting tokens.
-    vestingAgreementCid : ContractId VestingAgreement
-      -- ^ The contract ID of the specific `VestingAgreement` this admin contract controls.
+    issuer: Party
+      -- ^ The entity that issued the tokens and the schedule.
+    admin: Party
+      -- ^ The party with administrative rights (e.g., HR, Finance).
+    grantee: Party
+      -- ^ The recipient of the vested tokens.
+    vestingScheduleCid: ContractId VestingSchedule
+      -- ^ The contract ID of the vesting schedule being administered.
   where
     signatory issuer
-    observer beneficiary
+    observer admin, grantee
 
-    key (issuer, beneficiary, vestingAgreementCid) : (Party, Party, ContractId VestingAgreement)
+    key (issuer, admin, grantee, vestingScheduleCid) : (Party, Party, Party, ContractId VestingSchedule)
     maintainer key._1
 
-    -- | Allows the issuer to revoke the vesting agreement, halting any future vesting.
-    -- | This is a destructive action that should align with the legal terms of the grant.
-    -- | Vested tokens are unaffected, but all unvested tokens are forfeited.
-    choice RevokeVesting : ()
+    -- | Allows the admin to permanently revoke the vesting schedule.
+    -- This action is typically used in case of employment termination. The underlying
+    -- `VestingSchedule` template contains the logic for how unvested tokens are handled
+    -- upon revocation.
+    choice AdminRevokeSchedule : ()
       with
-        revocationTime : Time
-          -- ^ The timestamp when the revocation becomes effective.
-        reason : Text
-          -- ^ A brief explanation for the revocation.
-      controller issuer
+        reason: Text
+          -- ^ A description of why the schedule is being revoked.
+      controller admin
       do
-        -- The core revocation logic resides on the `VestingAgreement` template itself.
-        -- This choice serves as a controller to invoke that logic. The `Revoke` choice
-        -- on the agreement is expected to handle the archival of the agreement and the
-        -- return of unvested tokens.
-        exercise vestingAgreementCid TokenVesting.Revoke with
-          revocationTime, reason
+        -- Fetch the target schedule to ensure it's active.
+        schedule <- fetch vestingScheduleCid
+        assertMsg "Vesting schedule has already been revoked." (not schedule.isRevoked)
 
-        -- Since the underlying agreement is terminated, this administrative contract
-        -- is no longer needed and is archived.
+        -- Delegate the revocation logic to the VestingSchedule template itself.
+        -- This choice will archive the old schedule and create a new one in a revoked state.
+        exercise vestingScheduleCid Revoke with reason
+
+        -- After revocation, this admin contract has served its purpose and is archived.
         archive self
 
-    -- | Allows the issuer to trigger an accelerated vesting schedule. This is typically
-    -- | done in response to a predefined liquidity event, such as a company acquisition
-    -- | or IPO, as specified in the grant agreement.
-    choice AccelerateVesting : ContractId VestingAdmin
+    -- | Allows the admin to trigger accelerated vesting, for example, upon a
+    -- liquidity event like an acquisition or IPO. This choice modifies the
+    -- vesting schedule to make all remaining tokens vest on a new, earlier date.
+    choice AdminAccelerateVesting : ContractId VestingAdmin
       with
-        eventTime : Time
-          -- ^ The timestamp of the event that triggers the acceleration.
-        reason : Text
-          -- ^ A description of the acceleration event (e.g., "Acquisition by ACME Corp").
-      controller issuer
+        eventDescription: Text
+          -- ^ A description of the liquidity event causing the acceleration.
+        newVestingDate: Date
+          -- ^ The date on which all remaining tokens will immediately vest.
+      controller admin
       do
-        -- The `Accelerate` choice on the `VestingAgreement` is expected to archive the
-        -- current agreement and create a new one with an updated, accelerated schedule.
-        -- It returns the ContractId of this new agreement.
-        newVestingAgreementCid <- exercise vestingAgreementCid TokenVesting.Accelerate with
-          eventTime, reason
+        schedule <- fetch vestingScheduleCid
 
-        -- To maintain administrative control over the new, accelerated agreement,
-        -- we create a new `VestingAdmin` contract linked to it. The current admin
-        -- contract is consumed in this choice.
-        create VestingAdmin with
-          issuer = this.issuer
-          beneficiary = this.beneficiary
-          vestingAgreementCid = newVestingAgreementCid
+        -- Perform validation checks before proceeding.
+        assertMsg "Cannot accelerate a revoked vesting schedule." (not schedule.isRevoked)
+        assertMsg "New vesting date cannot be before the schedule's start date." (newVestingDate >= schedule.startDate)
+        assertMsg "New vesting date cannot be after the schedule's original end date." (newVestingDate <= schedule.endDate)
+
+        -- Delegate the acceleration logic to the VestingSchedule template.
+        -- This returns the contract ID of the updated (accelerated) schedule.
+        newScheduleCid <- exercise vestingScheduleCid Accelerate with
+          eventDescription = eventDescription
+          newVestingDate = newVestingDate
+
+        -- Create a new VestingAdmin contract pointing to the updated schedule.
+        create this with vestingScheduleCid = newScheduleCid

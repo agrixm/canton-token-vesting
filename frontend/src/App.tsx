@@ -1,271 +1,275 @@
-import React, { useState, useEffect, useCallback, CSSProperties } from 'react';
-import {
-  getActiveVestingAgreements,
-  exerciseClaim,
-  exerciseRevoke,
-  VestingAgreement,
-} from './vestingService';
+import React, { useState, useEffect, useCallback } from 'react';
+import { DamlLedger, useParty, useStreamQueries, useLedger } from '@c7/react';
+import { VestingSchedule } from '@daml.js/canton-token-vesting-0.1.0/lib/Vesting';
+import { ContractId } from '@daml/types';
+import { claimVestedTokens, revokeVesting } from './vestingService';
+import { httpUrl, wsUrl } from './ledgerClient';
+import './App.css';
 
-// --- STYLES ---
-const styles: { [key: string]: CSSProperties } = {
-  container: {
-    fontFamily: 'Arial, sans-serif',
-    maxWidth: '1200px',
-    margin: '0 auto',
-    padding: '20px',
-    color: '#333',
-  },
-  header: {
-    textAlign: 'center',
-    marginBottom: '30px',
-    borderBottom: '2px solid #eee',
-    paddingBottom: '10px',
-  },
-  title: {
-    fontSize: '2em',
-    color: '#003366',
-  },
-  controls: {
-    display: 'flex',
-    gap: '20px',
-    alignItems: 'center',
-    padding: '20px',
-    backgroundColor: '#f9f9f9',
-    borderRadius: '8px',
-    marginBottom: '30px',
-  },
-  inputGroup: {
-    display: 'flex',
-    flexDirection: 'column',
-  },
-  label: {
-    marginBottom: '5px',
-    fontSize: '0.9em',
-    fontWeight: 'bold',
-  },
-  input: {
-    padding: '10px',
-    border: '1px solid #ccc',
-    borderRadius: '4px',
-    width: '250px',
-  },
-  button: {
-    padding: '10px 20px',
-    border: 'none',
-    borderRadius: '4px',
-    backgroundColor: '#00529B',
-    color: 'white',
-    cursor: 'pointer',
-    fontSize: '1em',
-    alignSelf: 'flex-end',
-  },
-  buttonDisabled: {
-    backgroundColor: '#aaa',
-    cursor: 'not-allowed',
-  },
-  actionButton: {
-    padding: '5px 10px',
-    fontSize: '0.9em',
-    marginRight: '5px'
-  },
-  revokeButton: {
-    backgroundColor: '#D9534F',
-  },
-  message: {
-    textAlign: 'center',
-    padding: '20px',
-    fontSize: '1.1em',
-    borderRadius: '8px',
-  },
-  error: {
-    backgroundColor: '#f2dede',
-    color: '#a94442',
-    border: '1px solid #ebccd1',
-  },
-  loading: {
-    color: '#31708f',
-  },
-  table: {
-    width: '100%',
-    borderCollapse: 'collapse',
-    marginTop: '20px',
-  },
-  th: {
-    backgroundColor: '#f2f2f2',
-    border: '1px solid #ddd',
-    padding: '12px',
-    textAlign: 'left',
-    fontWeight: 'bold',
-  },
-  td: {
-    border: '1px solid #ddd',
-    padding: '12px',
-  },
-  tr: {
-    '&:nth-child(even)': {
-      backgroundColor: '#f9f9f9',
-    },
-  },
+const lsKey = "canton-vesting-app-credentials";
+
+type Credentials = {
+  party: string;
+  token: string;
+}
+
+/**
+ * Calculates the vested amount at a given point in time.
+ * This logic should mirror the logic in the Daml smart contract.
+ */
+const calculateVestedAmount = (schedule: VestingSchedule, now: Date): number => {
+  const { totalAllocation, startDate, cliffDate, endDate } = schedule;
+
+  const start = new Date(startDate).getTime();
+  const cliff = new Date(cliffDate).getTime();
+  const end = new Date(endDate).getTime();
+  const nowTime = now.getTime();
+
+  if (nowTime < cliff) {
+    return 0.0;
+  }
+  if (nowTime >= end) {
+    return parseFloat(totalAllocation);
+  }
+
+  const duration = end - start;
+  // Avoid division by zero if start and end are the same
+  if (duration <= 0) {
+    return parseFloat(totalAllocation);
+  }
+
+  const elapsed = nowTime - start;
+  const vestedRatio = elapsed / duration;
+  const vestedRaw = parseFloat(totalAllocation) * vestedRatio;
+
+  // Ensure vested amount doesn't exceed total allocation due to floating point math
+  return Math.min(vestedRaw, parseFloat(totalAllocation));
 };
 
-// --- COMPONENT ---
-const App: React.FC = () => {
-  const [party, setParty] = useState<string>('');
-  const [token, setToken] = useState<string>('');
-  const [agreements, setAgreements] = useState<VestingAgreement[]>([]);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
+const formatAmount = (amount: string | number): string => {
+  return parseFloat(amount.toString()).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+};
 
-  const fetchAgreements = useCallback(async () => {
-    if (!party || !token) {
-      setError("Please provide a Party and Auth Token to view vesting agreements.");
-      setAgreements([]);
-      return;
-    }
-    setLoading(true);
+const formatDate = (dateStr: string): string => {
+  return new Date(dateStr).toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+};
+
+const VestingScheduleCard: React.FC<{ contract: { contractId: ContractId<VestingSchedule>, payload: VestingSchedule } }> = ({ contract }) => {
+  const { contractId, payload } = contract;
+  const { grantor, beneficiary, token, totalAllocation, claimedAmount, startDate, cliffDate, endDate } = payload;
+  const ledger = useLedger();
+  const party = useParty();
+  const [isBusy, setIsBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [currentTime, setCurrentTime] = useState(() => new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const vestedAmount = calculateVestedAmount(payload, currentTime);
+  const claimableAmount = vestedAmount - parseFloat(claimedAmount);
+  const isGrantor = party === grantor;
+
+  const handleClaim = async () => {
+    setIsBusy(true);
     setError(null);
     try {
-      const fetchedAgreements = await getActiveVestingAgreements(party, token);
-      setAgreements(fetchedAgreements);
-      if (fetchedAgreements.length === 0) {
-        setError("No active vesting agreements found for this party.");
-      }
+      await claimVestedTokens(ledger, contractId);
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : "An unknown error occurred while fetching data.";
-      console.error("Fetch error:", err);
-      setError(`Failed to fetch agreements: ${errorMessage}`);
+      setError(err instanceof Error ? err.message : "An unknown error occurred during claim.");
     } finally {
-      setLoading(false);
-    }
-  }, [party, token]);
-
-  const handleClaim = async (contractId: string, claimableAmount: string) => {
-    if (parseFloat(claimableAmount) <= 0) return;
-    try {
-      await exerciseClaim(party, token, contractId);
-      alert('Claim successful!');
-      fetchAgreements(); // Refresh data after action
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : "Unknown error.";
-      alert(`Claim failed: ${errorMessage}`);
+      setIsBusy(false);
     }
   };
 
-  const handleRevoke = async (contractId: string) => {
-    if (!window.confirm("Are you sure you want to revoke this vesting agreement? This action cannot be undone.")) {
-      return;
-    }
+  const handleRevoke = async () => {
+    setIsBusy(true);
+    setError(null);
     try {
-      await exerciseRevoke(party, token, contractId);
-      alert('Revocation successful!');
-      fetchAgreements(); // Refresh data after action
+      await revokeVesting(ledger, contractId);
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : "Unknown error.";
-      alert(`Revocation failed: ${errorMessage}`);
+      setError(err instanceof Error ? err.message : "An unknown error occurred during revocation.");
+    } finally {
+      setIsBusy(false);
     }
   };
 
-  const formatNumber = (numStr: string) => {
-    return parseFloat(numStr).toLocaleString(undefined, {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 4,
-    });
+  const progressPercent = (parseFloat(claimedAmount) / parseFloat(totalAllocation)) * 100;
+  const vestedPercent = (vestedAmount / parseFloat(totalAllocation)) * 100;
+
+  return (
+    <div className="card">
+      <div className="card-header">
+        <h3>Vesting Schedule for {beneficiary}</h3>
+        <span className="token-symbol">{token.symbol}</span>
+      </div>
+      <div className="card-body">
+        <div className="details-grid">
+          <div>Grantor:</div><div>{grantor}</div>
+          <div>Beneficiary:</div><div>{beneficiary}</div>
+          <div>Total Allocation:</div><div>{formatAmount(totalAllocation)} {token.symbol}</div>
+          <div>Claimed Amount:</div><div>{formatAmount(claimedAmount)} {token.symbol}</div>
+          <div>Vested Amount:</div><div>{formatAmount(vestedAmount)} {token.symbol}</div>
+          <div>Claimable Amount:</div><div className="claimable">{formatAmount(claimableAmount)} {token.symbol}</div>
+          <div>Start Date:</div><div>{formatDate(startDate)}</div>
+          <div>Cliff Date:</div><div>{formatDate(cliffDate)}</div>
+          <div>End Date:</div><div>{formatDate(endDate)}</div>
+        </div>
+        <div className="progress-bar-container">
+          <div className="progress-bar-vested" style={{ width: `${vestedPercent}%` }}></div>
+          <div className="progress-bar-claimed" style={{ width: `${progressPercent}%` }}></div>
+          <div className="progress-bar-labels">
+            <span>Vested: {vestedPercent.toFixed(2)}%</span>
+            <span>Claimed: {progressPercent.toFixed(2)}%</span>
+          </div>
+        </div>
+      </div>
+      <div className="card-footer">
+        {error && <div className="error-message">{error}</div>}
+        <div className="actions">
+          <button
+            onClick={handleClaim}
+            disabled={isBusy || claimableAmount <= 0.0001}
+            className="button-primary"
+          >
+            {isBusy ? "Claiming..." : "Claim Vested Tokens"}
+          </button>
+          {isGrantor && (
+            <button
+              onClick={handleRevoke}
+              disabled={isBusy}
+              className="button-danger"
+            >
+              {isBusy ? "Revoking..." : "Revoke"}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+const Dashboard: React.FC = () => {
+  const party = useParty();
+  const { contracts, loading } = useStreamQueries(VestingSchedule);
+
+  if (loading) {
+    return <div className="loading-spinner">Loading vesting schedules...</div>;
+  }
+
+  const mySchedules = contracts.filter(c => c.payload.grantor === party || c.payload.beneficiary === party);
+
+  return (
+    <div className="dashboard">
+      <h1>My Vesting Schedules</h1>
+      {mySchedules.length === 0 ? (
+        <p>You are not a party to any active vesting schedules.</p>
+      ) : (
+        <div className="card-container">
+          {mySchedules.map(contract => (
+            <VestingScheduleCard key={contract.contractId} contract={contract} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const LoginScreen: React.FC<{ onLogin: (creds: Credentials) => void }> = ({ onLogin }) => {
+  const [party, setParty] = useState('');
+  const [token, setToken] = useState('');
+
+  const handleLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (party && token) {
+      onLogin({ party, token });
+    }
   };
 
   return (
-    <div style={styles.container}>
-      <header style={styles.header}>
-        <h1 style={styles.title}>Canton Token Vesting Dashboard</h1>
-      </header>
-
-      <div style={styles.controls}>
-        <div style={styles.inputGroup}>
-          <label htmlFor="party-input" style={styles.label}>Party ID</label>
+    <div className="login-container">
+      <form onSubmit={handleLogin} className="login-form">
+        <h2>Canton Vesting Dashboard</h2>
+        <p>Please provide your Party ID and a valid JWT token to continue.</p>
+        <div className="form-group">
+          <label htmlFor="party">Party ID</label>
           <input
-            id="party-input"
+            id="party"
             type="text"
             value={party}
             onChange={(e) => setParty(e.target.value)}
-            placeholder="Enter Party ID (e.g., Alice)"
-            style={styles.input}
+            placeholder="e.g., Alice::1220..."
+            required
           />
         </div>
-        <div style={styles.inputGroup}>
-          <label htmlFor="token-input" style={styles.label}>Auth Token (JWT)</label>
+        <div className="form-group">
+          <label htmlFor="token">Ledger JWT Token</label>
           <input
-            id="token-input"
+            id="token"
             type="password"
             value={token}
             onChange={(e) => setToken(e.target.value)}
-            placeholder="Enter your auth token"
-            style={styles.input}
+            placeholder="Enter your token"
+            required
           />
         </div>
-        <button
-          onClick={fetchAgreements}
-          disabled={!party || !token || loading}
-          style={{ ...styles.button, ...((!party || !token || loading) && styles.buttonDisabled) }}
-        >
-          {loading ? 'Loading...' : 'Fetch Agreements'}
-        </button>
-      </div>
-
-      {error && <div style={{ ...styles.message, ...styles.error }}>{error}</div>}
-
-      {agreements.length > 0 && (
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              <th style={styles.th}>Grantor</th>
-              <th style={styles.th}>Grantee</th>
-              <th style={styles.th}>Start Date</th>
-              <th style={styles.th}>Cliff Date</th>
-              <th style={styles.th}>End Date</th>
-              <th style={styles.th}>Total Tokens</th>
-              <th style={styles.th}>Vested Tokens</th>
-              <th style={styles.th}>Claimable Tokens</th>
-              <th style={styles.th}>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {agreements.map(({ contractId, payload }) => {
-              const isGrantor = party === payload.grantor;
-              const isGrantee = party === payload.grantee;
-              const claimable = parseFloat(payload.claimableAmount) > 0;
-
-              return (
-                <tr key={contractId} style={styles.tr}>
-                  <td style={styles.td}>{payload.grantor}</td>
-                  <td style={styles.td}>{payload.grantee}</td>
-                  <td style={styles.td}>{payload.schedule.startDate}</td>
-                  <td style={styles.td}>{payload.schedule.cliffDate}</td>
-                  <td style={styles.td}>{payload.schedule.endDate}</td>
-                  <td style={styles.td}>{formatNumber(payload.schedule.totalAmount)}</td>
-                  <td style={styles.td}>{formatNumber(payload.vestedAmount)}</td>
-                  <td style={styles.td}>{formatNumber(payload.claimableAmount)}</td>
-                  <td style={styles.td}>
-                    <button
-                      onClick={() => handleClaim(contractId, payload.claimableAmount)}
-                      disabled={!isGrantee || !claimable}
-                      style={{ ...styles.button, ...styles.actionButton, ...((!isGrantee || !claimable) && styles.buttonDisabled) }}
-                    >
-                      Claim
-                    </button>
-                    <button
-                      onClick={() => handleRevoke(contractId)}
-                      disabled={!isGrantor}
-                      style={{ ...styles.button, ...styles.actionButton, ...styles.revokeButton, ...(!isGrantor && styles.buttonDisabled) }}
-                    >
-                      Revoke
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
+        <button type="submit" className="button-primary">Login</button>
+      </form>
     </div>
+  );
+};
+
+
+const App: React.FC = () => {
+  const [credentials, setCredentials] = useState<Credentials | null>(() => {
+    const saved = localStorage.getItem(lsKey);
+    return saved ? JSON.parse(saved) : null;
+  });
+
+  const handleLogin = useCallback((creds: Credentials) => {
+    localStorage.setItem(lsKey, JSON.stringify(creds));
+    setCredentials(creds);
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    localStorage.removeItem(lsKey);
+    setCredentials(null);
+  }, []);
+
+  if (!credentials) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
+
+  return (
+    <DamlLedger
+      token={credentials.token}
+      party={credentials.party}
+      httpBaseUrl={httpUrl}
+      wsBaseUrl={wsUrl}
+    >
+      <div className="app-container">
+        <header className="app-header">
+          <h2>Vesting Dashboard</h2>
+          <div className="header-info">
+            <span>Logged in as: <strong>{credentials.party}</strong></span>
+            <button onClick={handleLogout} className="button-secondary">Logout</button>
+          </div>
+        </header>
+        <main className="app-main">
+          <Dashboard />
+        </main>
+      </div>
+    </DamlLedger>
   );
 };
 

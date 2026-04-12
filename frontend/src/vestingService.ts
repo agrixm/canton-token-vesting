@@ -1,209 +1,178 @@
-import { fetchFromLedger, Contract } from './ledgerClient';
+import { ledgerClient, LedgerClient } from './ledgerClient';
 
-// Assuming the main Daml module is named 'Vesting'
-const VESTING_MODULE = 'Vesting';
+// --- Constants ----------------------------------------------------------------
 
-// --- Type Definitions (mirroring Daml templates) ---
+// NOTE: The template IDs are formatted as `<Module>:<Template>`.
+// The JSON API can resolve these to the full package-specific IDs.
+const VESTING_SCHEDULE_TEMPLATE_ID = 'Vesting:VestingSchedule';
+const VESTING_ALLOCATION_TEMPLATE_ID = 'Vesting:VestingAllocation';
+
+// --- Type Definitions ---------------------------------------------------------
+// These types correspond to the Daml templates and data types in the model.
+
+export type DamlDecimal = string;
+export type DamlParty = string;
+export type DamlDate = string; // YYYY-MM-DD
+export type DamlTime = string; // ISO 8601 format
+export type DamlContractId = string;
 
 /**
- * Represents the vesting schedule parameters.
- * Mirrors `VestingSchedule.Schedule`.
+ * Represents the identifier for a token, analogous to a CUSIP or ISIN.
+ */
+export interface TokenIdentifier {
+  issuer: DamlParty;
+  symbol: string;
+  isFungible: boolean;
+}
+
+/**
+ * The payload of the VestingSchedule contract.
+ */
+export interface VestingSchedulePayload {
+  issuer: DamlParty;
+  beneficiary: DamlParty;
+  startDate: DamlDate;
+  cliffDate: DamlDate;
+  endDate: DamlDate;
+  totalAmount: DamlDecimal;
+  tokenIdentifier: TokenIdentifier;
+  isRevocable: boolean;
+  isAccelerated: boolean;
+  revokedAt: DamlTime | null;
+  acknowledged: boolean;
+}
+
+/**
+ * A full VestingSchedule contract object as returned by the JSON API.
  */
 export interface VestingSchedule {
-  grantDate: string; // ISO Date "YYYY-MM-DD"
-  cliffDurationDays: string; // Text representation of a number
-  totalVestingDurationDays: string; // Text representation of a number
+  contractId: DamlContractId;
+  templateId: string;
+  payload: VestingSchedulePayload;
 }
 
 /**
- * Payload for creating a new vesting grant proposal.
+ * The payload of the VestingAllocation contract.
  */
-export interface GrantProposalPayload {
-  issuer: string;
-  grantee: string;
-  admin: string;
-  schedule: VestingSchedule;
-  tokenTicker: string;
-  totalAmount: string; // Decimal as string, e.g., "10000.00"
-  revocable: boolean;
-  // `accelerationClause` would be added here if needed
+export interface VestingAllocationPayload {
+  scheduleId: DamlContractId;
+  issuer: DamlParty;
+  beneficiary: DamlParty;
+  vestedAmount: DamlDecimal;
+  claimedAmount: DamlDecimal;
+  tokenIdentifier: TokenIdentifier;
 }
 
 /**
- * Represents a `Vesting.GrantProposal` contract on the ledger.
+ * A full VestingAllocation contract object as returned by the JSON API.
  */
-export type GrantProposal = Contract<GrantProposalPayload>;
-
-/**
- * Represents a `Vesting.AcceptedGrant` contract on the ledger.
- * Payload is similar to proposal, but now signed by the grantee.
- */
-export type AcceptedGrant = Contract<GrantProposalPayload>;
-
-
-/**
- * Represents the payload of an active `Vesting.VestingGrant` contract.
- */
-export interface VestingGrantPayload extends GrantProposalPayload {
-  amountClaimed: string; // Decimal as string
-  lastClaimTimestamp: string; // ISO DateTime with Z
-  isRevoked: boolean;
-  revocationReason: string | null;
+export interface VestingAllocation {
+  contractId: DamlContractId;
+  templateId: string;
+  payload: VestingAllocationPayload;
 }
 
-/**
- * Represents an active `Vesting.VestingGrant` contract on the ledger.
- */
-export type VestingGrant = Contract<VestingGrantPayload>;
+// --- VestingService Class -------------------------------------------------------
 
+class VestingService {
+  private client: LedgerClient;
 
-// --- Service Functions ---
+  constructor(client: LedgerClient) {
+    this.client = client;
+  }
 
-/**
- * Fetches all pending grant proposals for a given party.
- * This can be the issuer who can withdraw it, or the grantee who can accept it.
- * @param token - The authentication token for the JSON API.
- * @returns A promise that resolves to an array of GrantProposal contracts.
- */
-export const getGrantProposals = async (token: string): Promise<GrantProposal[]> => {
-  const response = await fetchFromLedger<{ result: GrantProposal[] }>(
-    'v1/query',
-    token,
-    { templateIds: [`${VESTING_MODULE}:GrantProposal`] }
-  );
-  return response.result;
-};
+  /**
+   * Fetches all `VestingSchedule` contracts visible to the current party.
+   * @returns A promise that resolves to an array of VestingSchedule contracts.
+   */
+  public async getSchedules(): Promise<VestingSchedule[]> {
+    return this.client.query<VestingSchedule>({
+      templateIds: [VESTING_SCHEDULE_TEMPLATE_ID],
+    });
+  }
 
-/**
- * Fetches all grants that have been accepted by the grantee but not yet
- * acknowledged by the issuer.
- * @param token - The authentication token for the JSON API.
- * @returns A promise that resolves to an array of AcceptedGrant contracts.
- */
-export const getAcceptedGrants = async (token: string): Promise<AcceptedGrant[]> => {
-    const response = await fetchFromLedger<{ result: AcceptedGrant[] }>(
-      'v1/query',
-      token,
-      { templateIds: [`${VESTING_MODULE}:AcceptedGrant`] }
-    );
-    return response.result;
-  };
-
-/**
- * Fetches all active (acknowledged) vesting grants for a given party.
- * @param token - The authentication token for the JSON API.
- * @returns A promise that resolves to an array of VestingGrant contracts.
- */
-export const getActiveVestingGrants = async (token: string): Promise<VestingGrant[]> => {
-  const response = await fetchFromLedger<{ result: VestingGrant[] }>(
-    'v1/query',
-    token,
-    { templateIds: [`${VESTING_MODULE}:VestingGrant`] }
-  );
-  return response.result;
-};
-
-/**
- * Creates a new grant proposal on the ledger.
- * This is initiated by the issuer.
- * @param token - The authentication token for the JSON API.
- * @param proposal - The details of the vesting grant to propose.
- * @returns The result of the create command.
- */
-export const createGrantProposal = async (token: string, proposal: GrantProposalPayload) => {
-  return fetchFromLedger('v1/create', token, {
-    templateId: `${VESTING_MODULE}:GrantProposal`,
-    payload: proposal,
-  });
-};
-
-/**
- * Exercises the `Accept` choice on a `GrantProposal` contract.
- * This is performed by the grantee.
- * @param token - The authentication token for the JSON API.
- * @param contractId - The contract ID of the `GrantProposal` to accept.
- * @returns The result of the exercise command.
- */
-export const acceptGrant = async (token: string, contractId: string) => {
-  return fetchFromLedger('v1/exercise', token, {
-    templateId: `${VESTING_MODULE}:GrantProposal`,
-    contractId,
-    choice: 'Accept',
-    argument: {},
-  });
-};
-
-/**
- * Exercises the `Acknowledge` choice on an `AcceptedGrant` contract.
- * This is performed by the issuer to make the grant active.
- * @param token - The authentication token for the JSON API.
- * @param contractId - The contract ID of the `AcceptedGrant` to acknowledge.
- * @returns The result of the exercise command.
- */
-export const acknowledgeGrant = async (token: string, contractId: string) => {
-    return fetchFromLedger('v1/exercise', token, {
-      templateId: `${VESTING_MODULE}:AcceptedGrant`,
-      contractId,
-      choice: 'Acknowledge',
-      argument: {
-        acknowledgementTime: new Date().toISOString()
+  /**
+   * Fetches the unique `VestingAllocation` contract for a given schedule ID.
+   * Assumes there is at most one allocation per schedule.
+   * @param scheduleId The ContractId of the parent VestingSchedule.
+   * @returns A promise that resolves to the VestingAllocation contract, or null if not found.
+   */
+  public async getAllocation(scheduleId: DamlContractId): Promise<VestingAllocation | null> {
+    const allocations = await this.client.query<VestingAllocation>({
+      templateIds: [VESTING_ALLOCATION_TEMPLATE_ID],
+      query: {
+        scheduleId: scheduleId,
       },
     });
-  };
+    return allocations.length > 0 ? allocations[0] : null;
+  }
 
-/**
- * Exercises the `Claim` choice on a `VestingGrant` contract.
- * This is performed by the grantee to claim their vested tokens.
- * @param token - The authentication token for the JSON API.
- * @param contractId - The contract ID of the `VestingGrant`.
- * @returns The result of the exercise command.
- */
-export const claimVestedTokens = async (token: string, contractId: string) => {
-  return fetchFromLedger('v1/exercise', token, {
-    templateId: `${VESTING_MODULE}:VestingGrant`,
-    contractId,
-    choice: 'Claim',
-    argument: {
-      claimTime: new Date().toISOString(),
-    },
-  });
-};
+  /**
+   * Exercises the `Acknowledge` choice on a `VestingSchedule` contract.
+   * This is called by the beneficiary to accept the vesting terms.
+   * @param contractId The ContractId of the VestingSchedule to acknowledge.
+   * @returns A promise that resolves on successful exercise of the choice.
+   */
+  public async acknowledge(contractId: DamlContractId): Promise<unknown> {
+    return this.client.exerciseChoice({
+      templateId: VESTING_SCHEDULE_TEMPLATE_ID,
+      contractId,
+      choice: 'Acknowledge',
+      argument: {},
+    });
+  }
 
-/**
- * Exercises the `Revoke` choice on a `VestingGrant` contract.
- * This is performed by the issuer if the grant is revocable.
- * @param token - The authentication token for the JSON API.
- * @param contractId - The contract ID of the `VestingGrant` to revoke.
- * @param reason - The reason for revoking the grant.
- * @returns The result of the exercise command.
- */
-export const revokeGrant = async (token: string, contractId: string, reason: string) => {
-  return fetchFromLedger('v1/exercise', token, {
-    templateId: `${VESTING_MODULE}:VestingGrant`,
-    contractId,
-    choice: 'Revoke',
-    argument: {
-      revocationTime: new Date().toISOString(),
-      reason,
-    },
-  });
-};
+  /**
+   * Exercises the `Claim` choice on a `VestingAllocation` contract.
+   * This is called by the beneficiary to withdraw vested tokens.
+   * @param contractId The ContractId of the VestingAllocation to claim from.
+   * @returns A promise that resolves on successful exercise of the choice.
+   */
+  public async claim(contractId: DamlContractId): Promise<unknown> {
+    return this.client.exerciseChoice({
+      templateId: VESTING_ALLOCATION_TEMPLATE_ID,
+      contractId,
+      choice: 'Claim',
+      argument: {},
+    });
+  }
 
+  /**
+   * Exercises the `Revoke` choice on a `VestingSchedule` contract.
+   * This is called by the issuer to cancel the vesting schedule.
+   * @param contractId The ContractId of the VestingSchedule to revoke.
+   * @returns A promise that resolves on successful exercise of the choice.
+   */
+  public async revoke(contractId: DamlContractId): Promise<unknown> {
+    return this.client.exerciseChoice({
+      templateId: VESTING_SCHEDULE_TEMPLATE_ID,
+      contractId,
+      choice: 'Revoke',
+      argument: {},
+    });
+  }
 
-/**
- * Exercises the `Accelerate` choice on a `VestingGrant` contract.
- * This is performed by the admin upon a liquidity event.
- * @param token - The authentication token for the JSON API.
- * @param contractId - The contract ID of the `VestingGrant` to accelerate.
- * @returns The result of the exercise command.
- */
-export const accelerateVesting = async (token: string, contractId: string) => {
-    return fetchFromLedger('v1/exercise', token, {
-      templateId: `${VESTING_MODULE}:VestingGrant`,
+  /**
+   * Exercises the `Accelerate` choice on a `VestingSchedule` contract.
+   * This is called by the issuer to cause all remaining tokens to vest immediately.
+   * @param contractId The ContractId of the VestingSchedule to accelerate.
+   * @param accelerationDate The date on which the acceleration event occurred.
+   * @returns A promise that resolves on successful exercise of the choice.
+   */
+  public async accelerate(contractId: DamlContractId, accelerationDate: DamlDate): Promise<unknown> {
+    return this.client.exerciseChoice({
+      templateId: VESTING_SCHEDULE_TEMPLATE_ID,
       contractId,
       choice: 'Accelerate',
       argument: {
-        eventTime: new Date().toISOString(),
+        accelerationDate,
       },
     });
-  };
+  }
+}
+
+/**
+ * A singleton instance of the VestingService.
+ * This is used throughout the application to interact with the ledger.
+ */
+export const vestingService = new VestingService(ledgerClient);
